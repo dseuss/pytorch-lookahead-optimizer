@@ -1,4 +1,3 @@
-from lib2to3.pgen2.token import AMPER
 from pathlib import Path
 
 import click
@@ -12,9 +11,11 @@ from ignite.engine import _prepare_batch as prepare_batch
 from engine import (every_n, get_log_prefix, log_iterations_per_second,
                     step_lr_scheduler)
 
+from optim import AdamW, LookaheadOptimizer
+
 try:
     from torch.utils.tensorboard import SummaryWriter
-except ModuleNotFoundError:
+except (ModuleNotFoundError, ImportError):
     from tensorboardX import SummaryWriter
 
 try:
@@ -47,10 +48,34 @@ def build_data(num_workers=2):
                             drop_last=True),
         'valid': DataLoader(data['valid'], batch_size=128,
                             num_workers=num_workers, pin_memory=True,
-                            drop_last=True)
+                            drop_last=False)
     }
 
     return data, loaders
+
+
+def build_optimizer(model, apex_opt_level='O0', which='SGD'):
+    if which.lower() == 'sgd':
+        optimizer = torch.optim.SGD(
+            model.parameters(), lr=0.02, momentum=0.9, weight_decay=0.0001)
+    elif which.lower() == 'adamw':
+        optimizer = AdamW(
+            model.parameters(), lr=1e-3, weight_decay=0.3)
+    elif which.lower() == 'adam':
+        optimizer = torch.optim.Adam(
+            model.parameters(), lr=1e-3, weight_decay=0.3)
+    elif which.lower() == 'lookahead':
+        optimizer = LookaheadOptimizer(
+            model.parameters(), slow_update_rate=0.5, lookahead_steps=5,
+            lr=0.1, momentum=0.9, weight_decay=0.0001)
+    else:
+        raise ValueError(f'Unknown optimizer config {which}')
+
+    if MIXED_PRECISION:
+        model, optimizer = amp.initialize(model, optimizer, opt_level=apex_opt_level)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=[60, 120, 160], gamma=0.2)
+    return optimizer, scheduler
 
 
 def create_supervised_trainer(model, optimizer, loss_fn,
@@ -70,6 +95,7 @@ def create_supervised_trainer(model, optimizer, loss_fn,
                 scaled_loss.backward()
         else:
             loss.backward()
+
         optimizer.step()
         return loss.item()
 
@@ -81,8 +107,11 @@ def create_supervised_trainer(model, optimizer, loss_fn,
     '--workdir', '-w', type=click.Path(file_okay=False, writable=True),
     required=True)
 @click.option(
+    '--optimizer', '-o', type=click.Choice(['sgd', 'adam', 'adamw', 'lookahead']),
+    default='adam')
+@click.option(
     '--apex-opt-level', type=click.Choice(['O0', 'O1', 'O2', 'O3']))
-def cifar10(workdir, apex_opt_level):
+def cifar10(workdir, optimizer, apex_opt_level):
     if apex_opt_level is None:
         global MIXED_PRECISION
         MIXED_PRECISION = False
@@ -103,16 +132,10 @@ def cifar10(workdir, apex_opt_level):
     else:
         model = model.to(device)
 
-    optimizer = torch.optim.SGD(
-        model.parameters(), lr=0.2, momentum=0.9, weight_decay=0.001)
-    if MIXED_PRECISION:
-        model, optimizer = amp.initialize(model, optimizer, opt_level=apex_opt_level)
-
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[60, 120, 160], gamma=0.2)
-
-    trainer = ignite.engine.create_supervised_trainer(
-        model, optimizer, nn.functional.cross_entropy, device=device,
+    optimizer, scheduler = build_optimizer(model, which=optimizer,
+      apex_opt_level=apex_opt_level)
+    trainer = create_supervised_trainer(
+        model, optimizer, nn.CrossEntropyLoss(), device=device,
         non_blocking=True)
 
     metrics = {
