@@ -1,4 +1,5 @@
 import functools as ft
+import itertools as it
 from pathlib import Path
 
 import click
@@ -12,6 +13,7 @@ from torchvision import datasets, models, transforms
 from engine import (every_n, get_log_prefix, log_iterations_per_second,
                     step_lr_scheduler)
 from optim import AdamW, LookaheadOptimizer
+from tqdm import tqdm
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -78,7 +80,7 @@ def create_supervised_trainer(model, optimizer, loss_fn,
     return ignite.engine.Engine(_update)
 
 
-def train_cifar10(workdir, optimizer_callback, apex_opt_level=None):
+def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
     if apex_opt_level is None:
         global MIXED_PRECISION
         MIXED_PRECISION = False
@@ -115,12 +117,14 @@ def train_cifar10(workdir, optimizer_callback, apex_opt_level=None):
     evaluator = ignite.engine.create_supervised_evaluator(
         model, metrics=metrics, device=device, non_blocking=True)
     writer = SummaryWriter(workdir)
+    status = tqdm(total=len(loaders['train']) * loaders['train'].batch_size * epochs)
 
     @trainer.on(ignite.engine.Events.ITERATION_COMPLETED)
     @every_n(n=50)
     def log_training_progress(engine):
         prefix = get_log_prefix(engine)
-        print(f'{prefix} loss={engine.state.output:.04f}')
+        status.set_description(f'{prefix} loss={engine.state.output:.04f}')
+        status.update(engine.state.iteration)
 
     @trainer.on(ignite.engine.Events.EPOCH_COMPLETED)
     def run_evaluator(engine):  # pylint: disable=unused-variable
@@ -133,12 +137,12 @@ def train_cifar10(workdir, optimizer_callback, apex_opt_level=None):
 
     trainer.add_event_handler(
         ignite.engine.Events.EPOCH_STARTED,
-        step_lr_scheduler(optimizer, scheduler, summary_writer=writer))
+        step_lr_scheduler(optimizer, scheduler, summary_writer=writer, verbose=False))
     trainer.add_event_handler(
         ignite.engine.Events.ITERATION_COMPLETED,
-        log_iterations_per_second(summary_writer=writer))
+        log_iterations_per_second(summary_writer=writer, verbose=False))
 
-    trainer.run(loaders['train'], max_epochs=200)
+    trainer.run(loaders['train'], max_epochs=epochs)
 
 
 @click.command('cifar10')
