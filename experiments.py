@@ -1,16 +1,16 @@
+import functools as ft
 from pathlib import Path
 
 import click
 import ignite
 import torch
+from ignite.engine import _prepare_batch as prepare_batch
 from torch import nn
 from torch.utils.data import DataLoader
 from torchvision import datasets, models, transforms
-from ignite.engine import _prepare_batch as prepare_batch
 
 from engine import (every_n, get_log_prefix, log_iterations_per_second,
                     step_lr_scheduler)
-
 from optim import AdamW, LookaheadOptimizer
 
 try:
@@ -54,30 +54,6 @@ def build_data(num_workers=2):
     return data, loaders
 
 
-def build_optimizer(model, apex_opt_level='O0', which='SGD'):
-    if which.lower() == 'sgd':
-        optimizer = torch.optim.SGD(
-            model.parameters(), lr=0.02, momentum=0.9, weight_decay=0.0001)
-    elif which.lower() == 'adamw':
-        optimizer = AdamW(
-            model.parameters(), lr=1e-3, weight_decay=0.3)
-    elif which.lower() == 'adam':
-        optimizer = torch.optim.Adam(
-            model.parameters(), lr=1e-3, weight_decay=0.3)
-    elif which.lower() == 'lookahead':
-        optimizer = LookaheadOptimizer(
-            model.parameters(), slow_update_rate=0.5, lookahead_steps=5,
-            lr=0.1, momentum=0.9, weight_decay=0.0001)
-    else:
-        raise ValueError(f'Unknown optimizer config {which}')
-
-    if MIXED_PRECISION:
-        model, optimizer = amp.initialize(model, optimizer, opt_level=apex_opt_level)
-    scheduler = torch.optim.lr_scheduler.MultiStepLR(
-        optimizer, milestones=[60, 120, 160], gamma=0.2)
-    return optimizer, scheduler
-
-
 def create_supervised_trainer(model, optimizer, loss_fn,
                               device=None, non_blocking=False):
     if device:
@@ -102,16 +78,7 @@ def create_supervised_trainer(model, optimizer, loss_fn,
     return ignite.engine.Engine(_update)
 
 
-@click.command('cifar10')
-@click.option(
-    '--workdir', '-w', type=click.Path(file_okay=False, writable=True),
-    required=True)
-@click.option(
-    '--optimizer', '-o', type=click.Choice(['sgd', 'adam', 'adamw', 'lookahead']),
-    default='adam')
-@click.option(
-    '--apex-opt-level', type=click.Choice(['O0', 'O1', 'O2', 'O3']))
-def cifar10(workdir, optimizer, apex_opt_level):
+def train_cifar10(workdir, optimizer_callback, apex_opt_level=None):
     if apex_opt_level is None:
         global MIXED_PRECISION
         MIXED_PRECISION = False
@@ -122,6 +89,7 @@ def cifar10(workdir, optimizer, apex_opt_level):
     device = 'cuda:0' if torch.cuda.device_count() > 0 else 'cpu'
 
     _, loaders = build_data(num_workers=4)
+
     model = models.resnet18(pretrained=False, num_classes=10)
     model.avgpool = nn.Sequential()
 
@@ -132,8 +100,11 @@ def cifar10(workdir, optimizer, apex_opt_level):
     else:
         model = model.to(device)
 
-    optimizer, scheduler = build_optimizer(model, which=optimizer,
-      apex_opt_level=apex_opt_level)
+    optimizer = optimizer_callback(model.parameters())
+    if MIXED_PRECISION:
+        model, optimizer = amp.initialize(model, optimizer, opt_level=apex_opt_level)
+    scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=[60, 120, 160], gamma=0.2)
     trainer = create_supervised_trainer(
         model, optimizer, nn.CrossEntropyLoss(), device=device,
         non_blocking=True)
@@ -143,10 +114,7 @@ def cifar10(workdir, optimizer, apex_opt_level):
         'accuracy': ignite.metrics.Accuracy()}
     evaluator = ignite.engine.create_supervised_evaluator(
         model, metrics=metrics, device=device, non_blocking=True)
-
-    writers = {
-        'train': SummaryWriter(workdir / 'train'),
-        'valid': SummaryWriter(workdir / 'valid')}
+    writer = SummaryWriter(workdir)
 
     @trainer.on(ignite.engine.Events.ITERATION_COMPLETED)
     @every_n(n=50)
@@ -161,16 +129,34 @@ def cifar10(workdir, optimizer, apex_opt_level):
             evaluator.run(loader)
 
             for name, value in evaluator.state.metrics.items():  # pylint: disable=no-member
-                writers[split].add_scalar(f'metrics/{name}', value, engine.state.epoch)
+                writer.add_scalar(f'metrics/{split}_{name}', value, engine.state.epoch)
 
     trainer.add_event_handler(
         ignite.engine.Events.EPOCH_STARTED,
-        step_lr_scheduler(optimizer, scheduler, summary_writer=writers['train']))
+        step_lr_scheduler(optimizer, scheduler, summary_writer=writer))
     trainer.add_event_handler(
         ignite.engine.Events.ITERATION_COMPLETED,
-        log_iterations_per_second(summary_writer=writers['train']))
+        log_iterations_per_second(summary_writer=writer))
 
     trainer.run(loaders['train'], max_epochs=200)
+
+
+@click.command('cifar10')
+@click.option('--workdir', '-w', type=click.Path(file_okay=False, writable=True),
+              required=True)
+@click.option('--optimizer', '-o', required=True)
+@click.option('--apex-opt-level', type=click.Choice(['O0', 'O1', 'O2', 'O3']))
+def cifar10(workdir, optimizer, apex_opt_level):
+    optimizer_callbacks = {
+        'sgd': lambda p: torch.optim.SGD(p, lr=0.02, momentum=0.9, weight_decay=0.0001),
+        'adamw': lambda p: AdamW(p, lr=1e-3, weight_decay=0.3),
+        'adam': lambda p: torch.optim.Adam(p, lr=1e-3, weight_decay=0.3),
+        'lookahead': lambda p: LookaheadOptimizer(
+            p, slow_update_rate=0.5, lookahead_steps=5, lr=0.1,
+            momentum=0.9, weight_decay=0.0001)
+    }
+    train_cifar10(workdir, optimizer_callbacks[optimizer],
+                  apex_opt_level=apex_opt_level)
 
 
 if __name__ == '__main__':
