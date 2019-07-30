@@ -13,7 +13,7 @@ from torchvision import datasets, models, transforms
 
 from engine import (every_n, get_log_prefix, log_iterations_per_second,
                     step_lr_scheduler)
-from optim import LookaheadOptimizer
+from optim import AdamW, LookaheadOptimizer
 from tqdm import tqdm
 
 try:
@@ -164,7 +164,7 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
 def cifar10(workdir, optimizer, apex_opt_level):
     optimizer_callbacks = {
         'sgd': lambda p: torch.optim.SGD(p, lr=0.02, momentum=0.9, weight_decay=0.0001),
-        'adamw': lambda p: torch.optim.AdamW(p, lr=1e-3, weight_decay=0.3),
+        'adamw': lambda p: AdamW(p, lr=1e-3, weight_decay=0.3),
         'adam': lambda p: torch.optim.Adam(p, lr=1e-3, weight_decay=0.3),
         'lookahead': lambda p: LookaheadOptimizer(
             p, slow_update_rate=0.5, lookahead_steps=5, lr=0.1,
@@ -185,7 +185,7 @@ def _sgd_optimizer_sweep():
 def _adamw_optimizer_sweep():
     params = list(it.product([3e-4, 1e-3, 3e-3], [0.1, 0.3, 1, 3]))
     for lr, weight_decay in params:
-        callback = ft.partial(torch.optim.AdamW, lr=lr, weight_decay=weight_decay)
+        callback = ft.partial(AdamW, lr=lr, weight_decay=weight_decay)
         yield f'lr={lr}__weight_decay={weight_decay}', callback
 
 
