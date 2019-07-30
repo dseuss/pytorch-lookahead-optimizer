@@ -1,5 +1,6 @@
 import functools as ft
 import itertools as it
+from cmath import isnan
 from pathlib import Path
 
 import click
@@ -12,7 +13,7 @@ from torchvision import datasets, models, transforms
 
 from engine import (every_n, get_log_prefix, log_iterations_per_second,
                     step_lr_scheduler)
-from optim import AdamW, LookaheadOptimizer
+from optim import LookaheadOptimizer
 from tqdm import tqdm
 
 try:
@@ -26,6 +27,15 @@ try:
 except ModuleNotFoundError:
     print('Could not find APEX for mixed precision training')
     MIXED_PRECISION = False
+
+
+@click.group()
+def main():
+    pass
+
+
+class NaNError(Exception):
+    pass
 
 
 def build_data(num_workers=2):
@@ -93,7 +103,6 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
     _, loaders = build_data(num_workers=4)
 
     model = models.resnet18(pretrained=False, num_classes=10)
-    model.avgpool = nn.Sequential()
 
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
@@ -124,6 +133,8 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
     def log_training_progress(engine):
         prefix = get_log_prefix(engine)
         status.set_description(f'{prefix} loss={engine.state.output:.04f}')
+        if isnan(engine.state.output):
+            raise NaNError()
         status.update(engine.state.iteration)
 
     @trainer.on(ignite.engine.Events.EPOCH_COMPLETED)
@@ -145,7 +156,7 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
     trainer.run(loaders['train'], max_epochs=epochs)
 
 
-@click.command('cifar10')
+@main.command('cifar10')
 @click.option('--workdir', '-w', type=click.Path(file_okay=False, writable=True),
               required=True)
 @click.option('--optimizer', '-o', required=True)
@@ -153,7 +164,7 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
 def cifar10(workdir, optimizer, apex_opt_level):
     optimizer_callbacks = {
         'sgd': lambda p: torch.optim.SGD(p, lr=0.02, momentum=0.9, weight_decay=0.0001),
-        'adamw': lambda p: AdamW(p, lr=1e-3, weight_decay=0.3),
+        'adamw': lambda p: torch.optim.AdamW(p, lr=1e-3, weight_decay=0.3),
         'adam': lambda p: torch.optim.Adam(p, lr=1e-3, weight_decay=0.3),
         'lookahead': lambda p: LookaheadOptimizer(
             p, slow_update_rate=0.5, lookahead_steps=5, lr=0.1,
@@ -163,5 +174,59 @@ def cifar10(workdir, optimizer, apex_opt_level):
                   apex_opt_level=apex_opt_level)
 
 
+def _sgd_optimizer_sweep():
+    params = list(it.product([0.03, 0.05, 0.1, 0.2, 0.3], [0.00003, 0.001, 0.003]))
+    for lr, weight_decay in params:
+        callback = ft.partial(
+            torch.optim.SGD, lr=lr, weight_decay=weight_decay, momentum=0.9)
+        yield f'lr={lr}__weight_decay={weight_decay}', callback
+
+
+def _adamw_optimizer_sweep():
+    params = list(it.product([3e-4, 1e-3, 3e-3], [0.1, 0.3, 1, 3]))
+    for lr, weight_decay in params:
+        callback = ft.partial(torch.optim.AdamW, lr=lr, weight_decay=weight_decay)
+        yield f'lr={lr}__weight_decay={weight_decay}', callback
+
+
+def _adam_optimizer_sweep():
+    params = list(it.product([3e-4, 1e-3, 3e-3], [0.1, 0.3, 1, 3]))
+    for lr, weight_decay in params:
+        callback = ft.partial(torch.optim.Adam, lr=lr, weight_decay=weight_decay)
+        yield f'lr={lr}__weight_decay={weight_decay}', callback
+
+
+def _lookahead_optimizer_sweep():
+    params = list(it.product([0.1, 0.2], [0.2, 0.5, 0.8], [5, 10]))
+    for lr, slow_update_rate, lookahead_steps in params:
+        callback = ft.partial(
+            LookaheadOptimizer, lr=lr, slow_update_rate=slow_update_rate,
+            lookahead_steps=lookahead_steps, momentum=0.9)
+        yield f'lr={lr}__slow_update_rate={slow_update_rate}__lookahead_steps={lookahead_steps}', callback
+
+
+@main.command('cifar10-sweep')
+@click.option('--workdir', '-w', type=click.Path(file_okay=False, writable=True),
+              required=True)
+@click.option('--optimizer', '-o', required=True)
+@click.option('--apex-opt-level', type=click.Choice(['O0', 'O1', 'O2', 'O3']))
+def cifar10_sweep(workdir, optimizer, apex_opt_level):
+    workdir = Path(workdir)
+    optimizer_callbacks = {
+        'sgd': _sgd_optimizer_sweep(),
+        'adam': _adam_optimizer_sweep(),
+        'adamw': _adamw_optimizer_sweep(),
+        'lookahead': _lookahead_optimizer_sweep()
+    }
+
+    status = tqdm(list(optimizer_callbacks[optimizer]))
+    for prefix, callback in status:
+        status.set_description(prefix)
+        try:
+            train_cifar10(workdir / prefix, callback, apex_opt_level=apex_opt_level)
+        except NaNError:
+            pass
+
+
 if __name__ == '__main__':
-    cifar10()  # pylint: disable=no-value-for-parameter
+    main()  # pylint: disable=no-value-for-parameter

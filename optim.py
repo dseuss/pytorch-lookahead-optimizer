@@ -7,7 +7,6 @@ import torch
 from torch.optim.optimizer import Optimizer
 
 
-
 class LookaheadOptimizer(Optimizer):
     def __init__(self, params, fast_optimizer=torch.optim.SGD,
                  slow_update_rate=0.5, lookahead_steps=6, **kwargs):
