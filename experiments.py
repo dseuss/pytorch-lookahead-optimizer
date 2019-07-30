@@ -15,6 +15,7 @@ from engine import (every_n, get_log_prefix, log_iterations_per_second,
                     step_lr_scheduler)
 from optim import AdamW, LookaheadOptimizer
 from tqdm import tqdm
+from models import ResNet18
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -45,12 +46,14 @@ def build_data(num_workers=2):
             transform=transforms.Compose([
                 transforms.RandomCrop((32, 32), padding=4),
                 transforms.RandomHorizontalFlip(),
-                transforms.ToTensor()]
-            )
+                transforms.ToTensor(),
+            ])
         ),
         'valid': datasets.CIFAR10(
             root='./__pycache__', train=False, download=True,
-            transform=transforms.Compose([transforms.ToTensor()])
+            transform=transforms.Compose([
+                transforms.ToTensor(),
+            ])
         )
     }
 
@@ -107,7 +110,8 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None,
 
     _, loaders = build_data(num_workers=2)
 
-    model = models.resnet18(pretrained=False, num_classes=10)
+    #  model = models.resnet18(pretrained=False, num_classes=10)
+    model = ResNet18()
 
     if torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
