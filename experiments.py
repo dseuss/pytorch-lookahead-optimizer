@@ -90,17 +90,22 @@ def create_supervised_trainer(model, optimizer, loss_fn,
     return ignite.engine.Engine(_update)
 
 
-def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
+def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None,
+                  seed=None):
     if apex_opt_level is None:
         global MIXED_PRECISION
         MIXED_PRECISION = False
+
+    if seed is not None:
+        torch.cuda.manual_seed_all(seed)
+        torch.manual_seed(seed)
 
     workdir = Path(workdir)
     workdir.mkdir(exist_ok=True, parents=True)
 
     device = 'cuda:0' if torch.cuda.device_count() > 0 else 'cpu'
 
-    _, loaders = build_data(num_workers=4)
+    _, loaders = build_data(num_workers=2)
 
     model = models.resnet18(pretrained=False, num_classes=10)
 
@@ -137,6 +142,7 @@ def train_cifar10(workdir, optimizer_callback, epochs=200, apex_opt_level=None):
             raise NaNError()
         status.update(engine.state.iteration)
 
+    @trainer.on(ignite.engine.Events.STARTED)
     @trainer.on(ignite.engine.Events.EPOCH_COMPLETED)
     def run_evaluator(engine):  # pylint: disable=unused-variable
         model.eval()
@@ -223,7 +229,8 @@ def cifar10_sweep(workdir, optimizer, apex_opt_level):
     for prefix, callback in status:
         status.set_description(prefix)
         try:
-            train_cifar10(workdir / prefix, callback, apex_opt_level=apex_opt_level)
+            train_cifar10(workdir / prefix, callback, apex_opt_level=apex_opt_level,
+                          seed=8343)
         except NaNError:
             pass
 
