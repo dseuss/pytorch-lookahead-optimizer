@@ -50,9 +50,9 @@ class LookaheadOptimizer(Optimizer):
                     state['slow_weight'].requires_grad = False
 
                 slow_weight = state['slow_weight']
-                tensor.data = alpha * tensor.data + (1 - alpha) * slow_weight
+                slow_weight.data += alpha * (tensor.data - slow_weight)
+                tensor.data = slow_weight.data
                 tensor.grad = None
-                slow_weight.data = tensor.data
 
             group['step_counter'] = 0
 
